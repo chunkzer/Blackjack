@@ -12,6 +12,15 @@ type Deck = [Card]
 fullDeck :: Deck
 fullDeck = [Ace .. King] ++ [Ace .. King] ++ [Ace .. King] ++ [Ace .. King]
 
+
+getState :: Bool -> Int -> Int -> Int
+getState isSoft playerCount dealerCount
+    | isSoft = (playerCount - 4) + ((dealerCount-1) * 16)
+    | otherwise = 160 + (playerCount - 4) + ((dealerCount-1) * 16)
+
+initialPolicy :: [Float]
+initialPolicy = take 320 (repeat 0)
+
 shuffleCards :: Deck -> Deck -> IO Deck
 shuffleCards shuffled [] = return shuffled
 shuffleCards shuffled unshuffled = do
@@ -124,14 +133,22 @@ roundOutcome bet PlayerPlaying playerHand dealerHand (card:cards)
   | playerMove == DoubleDown = roundOutcome (2 * bet) DealerPlaying (card:playerHand) dealerHand cards
   where playerScore = handScore playerHand
         playerMove = playerNextMove playerHand (head dealerHand)
+        
+-- get the card value (for the overall count)
                            
 roundOutcome bet DealerPlaying playerHand dealerHand (card:cards)
-  | dealerScore == Bust = (findOutcome playerScore dealerScore, bet)
   | dealerMove == Hit   = roundOutcome bet DealerPlaying playerHand (card:dealerHand) cards
-  | dealerMove == Stand = (findOutcome playerScore dealerScore, bet)
+  | otherwise = (findOutcome playerScore dealerScore, bet)
   where playerScore = handScore playerHand
         dealerScore = handScore dealerHand
         dealerMove = dealerNextMove dealerHand
+
+countCard :: Card -> Int
+countCard card
+    | card == Ace = -1
+    | (head $ cardValues card ) < 7 = 1
+    | (head $ cardValues card ) < 10 = 0
+    | otherwise = -1
         
 roundTakings :: Money -> Hand -> Hand -> Deck -> Money
 roundTakings bet playerHand dealerHand remainingDeck = moneyMade finalBet outcome
