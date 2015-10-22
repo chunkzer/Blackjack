@@ -1,25 +1,15 @@
-import System.Random
 import Data.List
+import Data.Maybe
 import Text.Printf
-
--- a blackjack simulator to measure effectiveness of tactics
+import System.Random
+import Control.Monad.Random
+--Card, Hand, Deck info
+----------------------
 
 data Card = Ace | Two | Three | Four | Five | Six | Seven | Eight | Nine |
             Ten | Jack | Queen | King deriving (Show, Eq, Enum)
 type Hand = [Card]
 type Deck = [Card]
-
-fullDeck :: Deck
-fullDeck = [Ace .. King] ++ [Ace .. King] ++ [Ace .. King] ++ [Ace .. King]
-
-
-getState :: Bool -> Int -> Int -> Int
-getState isSoft playerCount dealerCount
-    | isSoft = (playerCount - 4) + ((dealerCount-1) * 16)
-    | otherwise = 160 + (playerCount - 4) + ((dealerCount-1) * 16)
-
-initialPolicy :: [Float]
-initialPolicy = take 320 (repeat 0)
 
 shuffleCards :: Deck -> Deck -> IO Deck
 shuffleCards shuffled [] = return shuffled
@@ -46,63 +36,80 @@ cardValues Eight = [8]
 cardValues Nine  = [9]
 cardValues _     = [10]
 
+fullDeck :: Deck
+fullDeck = [Ace .. King] ++ [Ace .. King] ++ [Ace .. King] ++ [Ace .. King]
+
 -- separate the first N cards in the deck from the rest of the deck
 dealCards :: Int -> Deck -> (Hand, Deck)
 dealCards number deck = (take number deck, drop number deck)
 
--- blackjack is a hand of two cards, an ace and a ten/picture card
-handIsBlackjack :: Hand -> Bool
-handIsBlackjack [card1, card2] =
-  ((card1 == Ace) && elem card2 [Ten, Jack, Queen, King]) ||
-  ((card2 == Ace) && elem card1 [Ten, Jack, Queen, King])
-handIsBlackjack _ = False
+seeds :: Integer -> [Int] -> IO [Int]
+seeds 0 seedArray = return seedArray
+seeds n x = do
+    seed <- getRandomR (1, 9999999)
+    seeds (n-1) (seed:x)
 
-handIsSoft :: Hand -> Bool
-handIsSoft hand = Ace `elem` hand
+---------------------------------------------------------------------------
 
--- work out the possible scores this hand could have. No concerns have
--- been given to efficiency here.
-possibleHandTotals :: Hand -> [Int] -> [Int]
-possibleHandTotals [] totals = sort $ nub totals
-possibleHandTotals (card:cards) runningTotals =
-  possibleHandTotals cards newTotals
-  where newTotals = [total + value | total <- runningTotals, value <- cardValues card]
+--Reinforcement learning data
+----------------------------
 
-data Score x = Value Int | Blackjack | Bust deriving (Show, Ord, Eq)
+-- State is defined by the player handScore, the value of the 
+-- dealer card showing and wether the players hand is soft or not.
+type State = (Score Int, Score Int, Bool)
 
-handScore :: Hand -> Score Int
-handScore hand
-  | null notBustTotals = Bust
-  | handIsBlackjack hand = Blackjack
-  | otherwise = Value (last notBustTotals)
-  where notBustTotals = filter (<= 21) $ possibleHandTotals hand [0]
+-- The Policy is made up of all known States and the expected 
+-- value of the actions available on that state (Hit, Stand)
+-- State is the key, Actions are the value
+type Actions = [Float]
+type Policy = (State, Actions)
 
--- todo: Split
-data Move = Hit | Stand | DoubleDown deriving (Show, Eq)
+state0Policy :: Policy
+state0Policy = ((Value 0, Value 0, False), [0,0])
 
--- in Las Vegas, dealer hits on soft 17
-dealerNextMove :: Hand -> Move
-dealerNextMove hand
-  | score < Value 17 = Hit
-  | score == Value 17 = if handIsSoft hand then Hit else Stand
-  | otherwise = Stand
-  where score = handScore hand
+-----------------------------
 
--- very simple player for the time being
-playerNextMove :: Hand -> Card -> Move
-playerNextMove playerHand dealerVisibleCard
-  | playerScore > Value 16 = Stand
-  | playerScore > Value 12 && dealerScore < Value 7 = Stand
-  | playerScore == Value 11 || playerScore == Value 10 = DoubleDown
-  | otherwise = Hit
-  where playerScore = handScore playerHand
-        dealerScore = handScore [dealerVisibleCard]
-        
--- since the money gained from winning with a blackjack hand is
--- different, we use two wins
+--Interpreting handscores
+data Score x = Blackjack | Value Int | Bust deriving (Show, Ord, Eq)
+
+fst' :: (a,b,c) -> a
+fst' (a,b,c) = a
+
+snd' :: (a,b,c) -> b
+snd' (a,b,c) = b
+
+thrd' :: (a,b,c) -> c
+thrd' (a,b,c) = c
+
+-- Association List functions
+-----------------------------------
+
+findKey :: (Eq k) => k -> [(k,v)] -> Maybe v  
+findKey key = foldr (\(k,v) acc -> if key == k then Just v else acc) Nothing
+
+
+findEntry :: (Eq k) => k -> [(k,v)] -> Maybe (k,v)  
+findEntry key = foldr (\(k,v) acc -> if key == k then Just (k,v) else acc) Nothing
+
+deleteFirst :: (Eq k) => k -> [(k,v)] -> [(k,v)]
+deleteFirst _ [] = [] 
+deleteFirst key (x:xs) 
+    | key == (fst x) = xs 
+    | otherwise = x:deleteFirst key xs
+
+
+--Blackjack game functionality
+------------------------------
+
+--Player moves
+data Move = Hit | Stand deriving (Show, Eq)
+
+--Round outcomes
 data Outcome = Loss | Push | Win | BlackjackWin deriving (Show, Eq)
 
--- a Las Vegas casino generally only deals with whole numbers of dollars
+data GameState = PlayerPlaying | DealerPlaying
+
+--Vegas deals with complete dollar amounts
 type Money = Integer
 
 -- calculate the money made in this hand
@@ -112,6 +119,38 @@ moneyMade _   Push         = 0
 moneyMade bet Win          = bet
 moneyMade bet BlackjackWin = ceiling $ (1.5 :: Double) * fromIntegral bet
 
+handIsBlackjack :: Hand -> Bool
+handIsBlackjack [card1, card2] =
+  ((card1 == Ace) && elem card2 [Ten, Jack, Queen, King]) ||
+  ((card2 == Ace) && elem card1 [Ten, Jack, Queen, King])
+handIsBlackjack _ = False
+
+handIsSoft :: Hand -> Bool
+handIsSoft hand = 1 < length (filter (<=20) $ (possibleHandTotals hand [0]))
+
+-- work out the possible scores this hand could have. No concerns have
+-- been given to efficiency here.
+possibleHandTotals :: Hand -> [Int] -> [Int]
+possibleHandTotals [] totals = sort $ nub totals
+possibleHandTotals (card:cards) runningTotals =
+  possibleHandTotals cards newTotals
+  where newTotals = [total + value | total <- runningTotals, value <- cardValues card]
+  
+handScore :: Hand -> Score Int
+handScore hand
+  | null notBustTotals = Bust
+  | handIsBlackjack hand = Blackjack
+  | otherwise = Value (last notBustTotals)
+  where notBustTotals = filter (<= 21) $ possibleHandTotals hand [0]
+  
+  -- in Las Vegas, dealer hits on soft 17
+dealerNextMove :: Hand -> Move
+dealerNextMove hand
+  | score < Value 17 = Hit
+  | score == Value 17 = if handIsSoft hand then Hit else Stand
+  | otherwise = Stand
+  where score = handScore hand
+  
 findOutcome :: Score Int -> Score Int -> Outcome
 findOutcome Bust _ = Loss
 findOutcome Blackjack _ = BlackjackWin
@@ -120,67 +159,141 @@ findOutcome playerScore dealerScore
   | playerScore > dealerScore = Win
   | playerScore == dealerScore = Push
   | otherwise = Loss
-                
-data GameState = PlayerPlaying | DealerPlaying
 
--- we pass the bet during the round too, since the bet can change
-roundOutcome :: Money -> GameState -> Hand -> Hand -> Deck -> (Outcome, Money)
-roundOutcome _ _ _ _ [] = error "Deck is empty!"
-roundOutcome bet PlayerPlaying playerHand dealerHand (card:cards)
-  | playerScore == Bust      = roundOutcome bet DealerPlaying playerHand dealerHand (card:cards)
-  | playerMove == Stand      = roundOutcome bet DealerPlaying playerHand dealerHand (card:cards)
-  | playerMove == Hit        = roundOutcome bet PlayerPlaying (card:playerHand) dealerHand cards
-  | playerMove == DoubleDown = roundOutcome (2 * bet) DealerPlaying (card:playerHand) dealerHand cards
+--psp = previous state policy
+roundOutcome :: Money -> GameState -> Hand -> Hand -> Deck -> [Policy] -> Policy -> [Int] -> ExploDecider -> (Outcome, Money, [Policy])
+roundOutcome _ _ _ _ [] _ _ _ _ = error "Deck is empty!"
+roundOutcome bet PlayerPlaying playerHand dealerHand (card:cards) policy psp (seed:seeds) explo
+  | playerScore == Bust      = roundOutcome bet DealerPlaying playerHand dealerHand (card:cards) newPolicy csp seeds explo
+  | fst playerMove == Stand  = roundOutcome bet DealerPlaying playerHand dealerHand (card:cards) newPolicy csp seeds explo
+  | fst playerMove == Hit    = roundOutcome bet PlayerPlaying (card:playerHand) dealerHand cards newPolicy csp seeds explo
   where playerScore = handScore playerHand
-        playerMove = playerNextMove playerHand (head dealerHand)
-        
--- get the card value (for the overall count)
-                           
-roundOutcome bet DealerPlaying playerHand dealerHand (card:cards)
-  | dealerMove == Hit   = roundOutcome bet DealerPlaying playerHand (card:dealerHand) cards
-  | otherwise = (findOutcome playerScore dealerScore, bet)
+        dealerScore = handScore [head dealerHand]
+        isSoft = handIsSoft playerHand
+        currentState = (playerScore, dealerScore, isSoft)
+        playerMove = playerNextMove currentState policy seed explo
+        --Current State Policy
+        csp = fromJust $ findEntry currentState (snd playerMove)
+        newPolicy = integratePolicy (snd playerMove) (updateStatePolicy psp csp (fst playerMove))        
+
+roundOutcome bet DealerPlaying playerHand dealerHand (card:cards) policy csp seeds explo
+  | (fst' (fst csp)) == Bust = (findOutcome playerScore dealerScore, bet, policy)
+  | (fst' (fst csp)) == Blackjack = (findOutcome playerScore dealerScore, bet, policy)
+  | dealerScore == Bust = (findOutcome playerScore dealerScore, bet, newPolicy)
+  | dealerMove == Hit   = roundOutcome bet DealerPlaying playerHand (card:dealerHand) cards policy csp seeds explo
+  | dealerMove == Stand = (findOutcome playerScore dealerScore, bet, newPolicy)
   where playerScore = handScore playerHand
         dealerScore = handScore dealerHand
+        -- final state policy, only relevant for adjusting last player action based on showdown result.
+        fsp = ((playerScore, dealerScore, False), [])
         dealerMove = dealerNextMove dealerHand
+        newPolicy = integratePolicy policy (updateStatePolicy csp fsp Stand)
 
-countCard :: Card -> Int
-countCard card
-    | card == Ace = -1
-    | (head $ cardValues card ) < 7 = 1
-    | (head $ cardValues card ) < 10 = 0
-    | otherwise = -1
-        
-roundTakings :: Money -> Hand -> Hand -> Deck -> Money
-roundTakings bet playerHand dealerHand remainingDeck = moneyMade finalBet outcome
-  where (outcome, finalBet) = roundOutcome bet PlayerPlaying playerHand dealerHand remainingDeck
-      
+roundResults :: Money -> Hand -> Hand -> Deck -> [Policy] -> [Int] -> ExploDecider -> (Money, [Policy])
+roundResults bet playerHand dealerHand remainingDeck policy seedValues explo = (moneyMade finalBet outcome, finalPolicy)
+  where (outcome, finalBet, finalPolicy) = roundOutcome bet PlayerPlaying playerHand dealerHand remainingDeck policy state0Policy seedValues explo
+----------------------------------------------------------------------------------------------------------
+
+--- Player Decision Making
+-----------------------------------------
+
+playerNextMove :: State -> [Policy] -> Int -> ExploDecider -> (Move, [Policy]) 
+playerNextMove currentState policy seed explo
+    | currentKey == Nothing = (Stand, (currentState, [0,0]):policy)
+    | move == 0 = (Hit, policy)  
+    | move == 1 = (Stand, policy)
+    | otherwise = error "Out of index move" 
+    where currentKey = findKey currentState policy
+          justKey = fromJust currentKey
+          move = (explo seed justKey)
+
+--Policy updating and accessing functions
+----------------------------------------
+integratePolicy :: [Policy] -> Policy -> [Policy]
+integratePolicy allPolicies (key, updatedActions) = (key, updatedActions):(deleteFirst key allPolicies) 
+
+updateStatePolicy :: Policy -> Policy -> Move -> Policy
+updateStatePolicy lstPol nxtPol move
+    | lstPol == state0Policy = lstPol
+    | move == Hit = hitAdjust lstPol nxtPol adjustFactors
+    | otherwise = standAdjust lstPol nxtPol adjustFactors
+    where discountFactor = 0.7
+          alpha = 0.2
+          adjustFactors = (discountFactor, alpha)
+          
+hitAdjust :: Policy -> Policy -> (Float, Float) -> Policy
+hitAdjust lstPolicy nxtPolicy (discountFactor, alpha)
+    | (fst' nxtState) == Bust =  (lstState, [(head lstActions) + (alpha * ((-1) - (head lstActions) )), (last lstActions)])
+    | (fst' nxtState) == Blackjack =  (lstState, [(head lstActions) + (alpha * ((1.5) - (head lstActions) )), (last lstActions)])
+    | otherwise = (lstState, [ (head lstActions) + (alpha * ((0 + discountFactor*(maxNxt)) - (head lstActions) )), (last lstActions)])
+    where lstState = fst lstPolicy
+          lstActions = snd lstPolicy
+          nxtState = fst nxtPolicy
+          nxtActions = snd nxtPolicy          
+          maxNxt = max (head nxtActions) (last nxtActions)
+
+standAdjust :: Policy -> Policy -> (Float, Float) -> Policy
+standAdjust lstPolicy nxtPolicy (discountFactor, alpha)
+    | (fst' nxtState)>(snd' nxtState) =  (lstState, [head lstActions, last lstActions + (alpha * (  1 -  last lstActions))])
+    | (fst' nxtState)==(snd' nxtState) = (lstState, [head lstActions, last lstActions + (alpha * (  0 - last lstActions))])
+    | otherwise =                        (lstState, [head lstActions, last lstActions + (alpha * ( -1 - last lstActions))])
+    where lstState = fst lstPolicy
+          lstActions = snd lstPolicy
+          nxtState = fst nxtPolicy
+          nxtActions = snd nxtPolicy
+          maxNxt = max (head nxtActions) (last nxtActions)
+          
+--------------------------------------------
+
+
+--- Meta functions
+--------------------------------------------
 -- play a game with the current strategy
-playRound :: Money -> IO Money
-playRound bet = do
-  shuffledDeck <- shuffleDeck
-  -- we don't deal cards in an alternating order, but it makes no difference
+playRound :: Money -> [Policy] -> ExploDecider -> IO (Money, [Policy])
+playRound bet policy explo= do
+  shuffledDeck <- shuffleDeck 
+  seedValues <- seeds 52 [] 
   let (playerHand, remainingDeck) = dealCards 2 shuffledDeck
       (dealerHand, remainingDeck') = dealCards 2 remainingDeck
-      takings = roundTakings bet playerHand dealerHand remainingDeck'
-  return takings
+      results = roundResults bet playerHand dealerHand remainingDeck' policy seedValues explo 
+  return results
 
 -- play a game N times and work out the overall takings/losses for the
 -- given bet size
-play :: Integer -> Money -> IO Money
-play 0 _ = return 0
-play count bet =
-  play' count bet 0
+play :: Integer -> Money -> [Policy] -> ExploDecider -> IO (Money, [Policy])
+play 0 _ policy explo = return (0, policy)  
+play count bet policy explo =
+  play' count bet 0 policy explo
   where
-    play' 0 _ accum = return accum
-    play' count' bet' accum = do
-      takings <- playRound bet'
-      play' (count' - 1) bet' (accum + takings)
-  
-main = do
-  let iterations = 10000 :: Integer
-      bet = 10 :: Money
-  takings <- play iterations bet :: IO Money
-  let houseEdge = fromInteger (-1 * takings) / fromInteger (bet * iterations)
-      housePercentage = 100 * houseEdge :: Double
-  printf "After %d $%d hands, total money made was $%d (house made %.2f%%).\n"
-    iterations bet takings housePercentage
+    play' :: Integer -> Money -> Money -> [Policy] -> ExploDecider -> IO (Money, [Policy])
+    play' 0 _ accum policy' explo = return (accum, policy')
+    play' count' bet' accum policy' explo = do
+      results <-  (playRound bet' policy' explo)
+      play' (count' - 1) bet' (accum + fst results) (snd results) explo
+      
+-------------------------------------------------
+--- Miscallenous Functions
+
+maxInd ::(Ord a) => [a] -> Integer
+maxInd [] = error "this is bullshit"
+maxInd array = maxim array (head array) 0 0
+
+maxim :: (Ord a) => [a] -> a -> Integer -> Integer -> Integer
+maxim [] currentMax index acc = index
+maxim (x:xs) currentMax currentIndex acc
+    | (x > currentMax) =  maxim xs x acc (acc+1)
+    | otherwise = maxim xs currentMax currentIndex (acc+1)
+
+--- Exploration / Exploitation Dilemma Functions
+-----------------------------------------------------
+type ExploDecider = Int -> Actions -> Integer
+    
+epsilonGreedy ::  Float -> Int -> [Float] -> Integer
+epsilonGreedy  epsilon seed actions 
+    | (epsilon > randomNumber) =  (toInteger seed `mod` (toInteger $ length actions))
+    | otherwise = maxInd actions
+    where  generator = mkStdGen seed 
+           randomNumber = fst (randomR (0.0, 1.0) generator)
+--
+greedy :: Int -> Actions -> Integer
+greedy seed actions = return maxInd actions
