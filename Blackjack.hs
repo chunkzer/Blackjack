@@ -65,12 +65,12 @@ type Actions = [Float]
 type Policy = (State, Actions)
 
 state0Policy :: Policy
-state0Policy = ((Value 0, Value 0, False), [0,0])
+state0Policy = ((Value 0, Value 0, False), [])
 
 -----------------------------
 
 --Interpreting handscores
-data Score x = Blackjack | Value Int | Bust deriving (Show, Ord, Eq)
+data Score x = Blackjack | Value Int | Bust deriving (Show, Ord, Eq, Read)
 
 fst' :: (a,b,c) -> a
 fst' (a,b,c) = a
@@ -294,6 +294,26 @@ epsilonGreedy  epsilon seed actions
     | otherwise = maxInd actions
     where  generator = mkStdGen seed 
            randomNumber = fst (randomR (0.0, 1.0) generator)
---
+
 greedy :: Int -> Actions -> Integer
-greedy seed actions = return maxInd actions
+greedy seed actions = maxInd actions
+
+randomAction :: Int -> Actions -> Integer
+randomAction seed actions = (toInteger seed `mod` (toInteger $ length actions))
+
+-----------------------------------------------------
+--- Main
+-----------------------------------------------------
+main = do
+  policyString <- (readFile "noPolicy.txt")
+  let policy = read policyString :: [Policy]
+  let iter = 10000
+  let bet = 10 :: Money
+  results <- play iter bet policy (epsilonGreedy 0.2) :: IO (Money, [Policy])
+  let takings = fst results
+  let policy = snd results
+  writeFile "Policy.txt" (show policy)
+  let houseEdge = fromInteger (-1 * takings) / fromInteger (bet * iter)
+      housePercentage = 100 * houseEdge :: Double
+  printf "After %d $%d hands, total money made was $%d (house made %.2f%%).\n"
+    iter bet takings housePercentage

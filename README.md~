@@ -1,6 +1,8 @@
 # Blackjack
 
-A blackjack simulator in Haskell with support for generating an optimal policy of play using reinforcement learning..
+A blackjack simulator in Haskell. The `playerNextMove` function
+implements the player's strategy, then the simulator runs many hands
+to measure the strategy effectiveness.
 
 GPLv2 license.
 
@@ -16,7 +18,4 @@ $ ghc Blackjack.hs
 $ ./Blackjack
 
 
-## Exploration vs Exploitation
-
-Supports epsilon-greedy and greedy algorithms.
 
